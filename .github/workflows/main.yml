@@ -1,0 +1,102 @@
+name: Build Android SDK Tools
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch: 
+    inputs:
+      sdk_version:
+        description: 'Android SDK version tag'
+        required: false
+        default: 'platform-tools-36.0.0'
+      architectures:
+        description: 'Build architectures (comma separated)'
+        required: false
+        default: 'arm64-v8a,armeabi-v7a,x86_64'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: 
+        abi: 
+          - arm64-v8a
+          - armeabi-v7a
+          - x86_64
+          - x86
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake ninja-build \
+          git golang-go \
+          bison flex \
+          python3-requests
+        
+    - name: Download Android NDK
+      run: |
+        NDK_VERSION="r27"
+        wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux. zip
+        unzip -q android-ndk-${NDK_VERSION}-linux.zip
+        echo "NDK_HOME=${PWD}/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+        
+    - name: Clone source repositories
+      run: |
+        python get_source.py --tags ${{ github.event.inputs.sdk_version || 'platform-tools-36.0.0' }}
+        
+    - name: Build protobuf for host
+      run: |
+        cd src/protobuf
+        mkdir -p build && cd build
+        cmake -GNinja -Dprotobuf_BUILD_TESTS=OFF .. 
+        ninja -j$(nproc)
+        echo "PROTOC_PATH=${PWD}/protoc" >> $GITHUB_ENV
+        
+    - name: Build SDK Tools for ${{ matrix.abi }}
+      run: |
+        python build.py \
+          --ndk=${NDK_HOME} \
+          --abi=${{ matrix.abi }} \
+          --build=build/${{ matrix. abi }} \
+          --protoc=${PROTOC_PATH} \
+          --api=30
+          
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name:  android-sdk-tools-${{ matrix.abi }}
+        path: build/${{ matrix.abi }}/android-sdk-tools-*. zip
+        retention-days: 30
+        
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with: 
+        files: artifacts/**/*. zip
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
